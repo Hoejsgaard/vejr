@@ -43,7 +43,7 @@
     visibility: hidden;
   }
   #app.stale { opacity: 0.4; }
-  #app.night { opacity: 0.12; }
+  #app.night { opacity: 0.3; }
 
   .head {
     flex: 0 0 84px;
@@ -173,7 +173,10 @@
   var HOURS = 48;
   var ICON_EVERY = 2;
   var FETCH_MS = 10 * 60 * 1000;
-  var NIGHT_FROM = 22, NIGHT_TO = 5;
+  // Dim the screen at night. Off by default - turn it on if the lit screen
+  // bothers you in a dark kitchen.
+  var NIGHT_DIM = false;
+  var NIGHT_FROM = 23, NIGHT_TO = 5;
 
   var C = {
     temp:     "#e0322a",
@@ -528,7 +531,7 @@
       DAYNAMES[now.getDay()] + " " + now.getDate() + ". " + MONTHS[now.getMonth()];
 
     var hr = now.getHours();
-    var night = (hr >= NIGHT_FROM || hr < NIGHT_TO);
+    var night = NIGHT_DIM && (hr >= NIGHT_FROM || hr < NIGHT_TO);
     document.getElementById("app").className =
       night ? "night" : ((lastOk && Date.now() - lastOk > 95 * 60 * 1000) ? "stale" : "");
     document.body.className = night ? "night" : "";

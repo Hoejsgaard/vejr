@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Vejret">
+<meta http-equiv="refresh" content="21600">
+<title>Vejret</title>
+<style>
+  /* The whole page is laid out on a fixed 1024x768 canvas - the iPad 5's
+     point resolution - and then scaled to whatever viewport it lands in.
+     Nothing reflows, so the layout can never break. */
+
+  * { box-sizing: border-box; -webkit-text-size-adjust: 100%; }
+
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #ffffff;
+    overflow: hidden;
+  }
+  body.night { background: #000000; }
+
+  #fit {
+    position: absolute;
+    top: 0; left: 0;
+    width: 1024px;
+    height: 768px;
+    transform-origin: 0 0;
+  }
+
+  #app {
+    width: 1024px;
+    height: 768px;
+    padding: 14px 16px 8px;
+    display: flex;
+    flex-direction: column;
+    color: #1c2530;
+    font-family: -apple-system, "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    visibility: hidden;
+  }
+  #app.stale { opacity: 0.4; }
+  #app.night { opacity: 0.12; }
+
+  .head {
+    flex: 0 0 84px;
+    height: 84px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #e7eaee;
+    margin-bottom: 8px;
+  }
+
+  .title { font-size: 31px; font-weight: 600; letter-spacing: -0.015em; line-height: 1.1; }
+  .subtitle { font-size: 17px; color: #6b7787; margin-top: 5px; }
+
+  .now {
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+    padding-right: 26px;
+    margin-right: 26px;
+    border-right: 1px solid #e7eaee;
+  }
+  .now-temp { font-size: 46px; font-weight: 300; color: #e0322a; letter-spacing: -0.03em; line-height: 1; }
+  .now-text { margin-left: 15px; }
+  .now-cond { font-size: 18px; color: #1c2530; }
+  .now-wind { font-size: 16px; color: #6b7787; margin-top: 3px; }
+
+  .when { text-align: right; min-width: 168px; }
+  .clock { font-size: 38px; font-weight: 300; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .date { font-size: 16px; color: #6b7787; margin-top: 5px; }
+
+  #chart { flex: 0 0 628px; height: 628px; }
+  #chart svg { display: block; }
+
+  .foot {
+    flex: 0 0 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    color: #97a1af;
+  }
+  .legend { display: flex; align-items: center; }
+  .legend span { margin-right: 18px; display: flex; align-items: center; }
+  .swatch { width: 22px; height: 0; border-top: 2px solid; margin-right: 7px; }
+  .swatch.dash { border-top-style: dashed; }
+  .swatch.block { height: 11px; border: 0; }
+
+  .msg {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 20px;
+    color: #97a1af;
+    font-family: -apple-system, "Avenir Next", "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+</style>
+</head>
+<body>
+
+<div class="msg" id="boot">Henter vejret</div>
+
+<div id="fit">
+  <div id="app">
+
+    <div class="head">
+
+      <!-- ===== REDIGER OVERSKRIFTEN HER ===== -->
+      <div>
+        <div class="title">Vejret i Vangede</div>
+        <div class="subtitle" id="summary"></div>
+      </div>
+      <!-- ==================================== -->
+
+      <div class="now">
+        <div class="now-temp" id="nowTemp"></div>
+        <div class="now-text">
+          <div class="now-cond" id="nowCond"></div>
+          <div class="now-wind" id="nowWind"></div>
+        </div>
+      </div>
+
+      <div class="when">
+        <div class="clock" id="clock"></div>
+        <div class="date" id="date"></div>
+      </div>
+
+    </div>
+
+    <div id="chart"></div>
+
+    <div class="foot">
+      <div class="legend">
+        <span><i class="swatch" style="border-color:#e0322a"></i>Temperatur</span>
+        <span><i class="swatch block" style="background:#2196d3"></i>Nedbør</span>
+        <span><i class="swatch" style="border-color:#1a9aa8"></i>Middelvind</span>
+        <span><i class="swatch dash" style="border-color:#1a9aa8"></i>Vindstød</span>
+      </div>
+      <div id="updated"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- fixed canvas -------------------------------------------------------
+
+  var CANVAS_W = 1024, CANVAS_H = 768;     // iPad 5 in points
+  var CHART_W = CANVAS_W - 32;             // minus the app's side padding
+  var CHART_H = 628;
+
+  function fit() {
+    var s = Math.min(window.innerWidth / CANVAS_W, window.innerHeight / CANVAS_H);
+    var el = document.getElementById("fit");
+    el.style.transform =
+      "translate(" + ((window.innerWidth - CANVAS_W * s) / 2).toFixed(1) + "px,"
+                   + ((window.innerHeight - CANVAS_H * s) / 2).toFixed(1) + "px) scale(" + s.toFixed(4) + ")";
+  }
+
+  // ---- config -------------------------------------------------------------
+
+  var LAT = 55.7464;                 // Vangede
+  var LON = 12.5335;
+  var HOURS = 48;
+  var ICON_EVERY = 2;
+  var FETCH_MS = 10 * 60 * 1000;
+  var NIGHT_FROM = 22, NIGHT_TO = 5;
+
+  var C = {
+    temp:     "#e0322a",
+    rainLow:  "#a8d5ef",
+    rainHigh: "#2196d3",
+    wind:     "#1a9aa8",
+    sun:      "#f5b301",
+    moon:     "#8fa3bd",
+    cloud:    "#9aa5b2",
+    drop:     "#4aa8dd",
+    ink:      "#1c2530",
+    muted:    "#6b7787",
+    faint:    "#97a1af",
+    grid:     "#e7eaee",
+    band:     "#f5f7f9",
+    sep:      "#c9d0d8"
+  };
+
+  var URL = "https://api.open-meteo.com/v1/forecast"
+    + "?latitude=" + LAT + "&longitude=" + LON
+    + "&models=dmi_seamless"
+    + "&timezone=Europe%2FCopenhagen"
+    + "&wind_speed_unit=ms"
+    + "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
+    + "&hourly=temperature_2m,precipitation,weather_code,is_day,wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+    + "&forecast_days=4";
+
+  // ---- weather codes and icons -------------------------------------------
+
+  function group(code) {
+    if (code === 0) return "clear";
+    if (code === 1 || code === 2) return "partly";
+    if (code === 3) return "cloud";
+    if (code === 45 || code === 48) return "fog";
+    if (code >= 51 && code <= 57) return "drizzle";
+    if (code >= 61 && code <= 67) return "rain";
+    if (code >= 71 && code <= 77) return "snow";
+    if (code >= 80 && code <= 82) return "rain";
+    if (code === 85 || code === 86) return "snow";
+    if (code >= 95) return "thunder";
+    return "cloud";
+  }
+
+  var NAMES = {
+    clear: "klart", partly: "delvist skyet", cloud: "overskyet", fog: "tåge",
+    drizzle: "finregn", rain: "regn", snow: "sne", thunder: "tordenvejr"
+  };
+
+  function sun(cx, cy, r) {
+    var s = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + C.sun + '"/>';
+    for (var a = 0; a < 8; a++) {
+      var t = a * Math.PI / 4;
+      var x1 = cx + Math.cos(t) * (r + 1.9), y1 = cy + Math.sin(t) * (r + 1.9);
+      var x2 = cx + Math.cos(t) * (r + 4.0), y2 = cy + Math.sin(t) * (r + 4.0);
+      s += '<line x1="' + x1.toFixed(1) + '" y1="' + y1.toFixed(1) + '" x2="' + x2.toFixed(1)
+         + '" y2="' + y2.toFixed(1) + '" stroke="' + C.sun + '" stroke-width="1.7" stroke-linecap="round"/>';
+    }
+    return s;
+  }
+
+  function moon(cx, cy, r) {
+    return '<path d="M' + (cx + r * 0.55) + ' ' + (cy - r)
+      + ' a' + r + ' ' + r + ' 0 1 0 ' + (r * 0.8) + ' ' + (r * 1.55)
+      + ' a' + (r * 0.95) + ' ' + (r * 0.95) + ' 0 1 1 ' + (-r * 0.8) + ' ' + (-r * 1.55)
+      + 'z" fill="' + C.moon + '"/>';
+  }
+
+  function cloudPath() {
+    return '<path d="M7.5 18h9a3.4 3.4 0 0 0 .3-6.8A5.4 5.4 0 0 0 6.9 12 3 3 0 0 0 7.5 18z" fill="' + C.cloud + '"/>';
+  }
+
+  function drops(n) {
+    var s = "", xs = [9, 12.5, 16];
+    for (var i = 0; i < n; i++) {
+      s += '<line x1="' + xs[i] + '" y1="19.4" x2="' + (xs[i] - 1) + '" y2="22.4" stroke="' + C.drop
+        + '" stroke-width="1.8" stroke-linecap="round"/>';
+    }
+    return s;
+  }
+
+  function iconSvg(code, isDay) {
+    var g = group(code);
+    if (g === "clear")  return isDay ? sun(12, 12, 5) : moon(12, 12, 5.4);
+    if (g === "partly") return (isDay ? sun(9, 8, 3.6) : moon(9, 8, 3.9)) + cloudPath();
+    if (g === "cloud")  return cloudPath();
+    if (g === "fog") {
+      return cloudPath()
+        + '<line x1="5.5" y1="20.5" x2="18.5" y2="20.5" stroke="' + C.cloud + '" stroke-width="1.8" stroke-linecap="round"/>'
+        + '<line x1="8" y1="23" x2="16" y2="23" stroke="' + C.cloud + '" stroke-width="1.8" stroke-linecap="round"/>';
+    }
+    if (g === "drizzle") return cloudPath() + drops(2);
+    if (g === "rain")    return cloudPath() + drops(3);
+    if (g === "snow") {
+      return cloudPath() + '<g fill="' + C.drop + '"><circle cx="9" cy="21" r="1.2"/>'
+        + '<circle cx="12.5" cy="22.6" r="1.2"/><circle cx="16" cy="21" r="1.2"/></g>';
+    }
+    if (g === "thunder") {
+      return cloudPath() + '<path d="M13.2 19l-3.4 4h3.2l-1.4 3.2" fill="none" stroke="' + C.sun
+        + '" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>';
+    }
+    return cloudPath();
+  }
+
+  // ---- helpers ------------------------------------------------------------
+
+  var DAYNAMES = ["Søndag", "Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag"];
+  var MONTHS = ["januar", "februar", "marts", "april", "maj", "juni",
+                "juli", "august", "september", "oktober", "november", "december"];
+
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  function round(n) { return Math.round(n); }
+  function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+
+  // Open-Meteo returns local times as "2026-09-01T07:00". Older WebKit parses
+  // that inconsistently with new Date(), so read the fields out by hand.
+  function parseLocal(s) {
+    return new Date(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10),
+                    +s.slice(11, 13), +s.slice(14, 16), 0, 0);
+  }
+
+  function firstFutureIndex(times) {
+    var now = Date.now();
+    for (var i = 0; i < times.length; i++) {
+      if (parseLocal(times[i]).getTime() >= now - 30 * 60 * 1000) return i;
+    }
+    return 0;
+  }
+
+  function niceAxis(lo, hi, want) {
+    if (hi - lo < 1e-6) hi = lo + 1;
+    var raw = (hi - lo) / want;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var norm = raw / mag;
+    var step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+    return { min: Math.floor(lo / step) * step, max: Math.ceil(hi / step) * step, step: step };
+  }
+
+  // Catmull-Rom converted to cubic bezier. Smooth like DMI's, no overshoot.
+  function smooth(pts) {
+    if (pts.length < 2) return "";
+    var d = "M" + pts[0][0].toFixed(1) + " " + pts[0][1].toFixed(1);
+    for (var i = 0; i < pts.length - 1; i++) {
+      var p0 = pts[i > 0 ? i - 1 : 0], p1 = pts[i], p2 = pts[i + 1];
+      var p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
+      d += "C" + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + " " + (p1[1] + (p2[1] - p0[1]) / 6).toFixed(1)
+         + " " + (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + " " + (p2[1] - (p3[1] - p1[1]) / 6).toFixed(1)
+         + " " + p2[0].toFixed(1) + " " + p2[1].toFixed(1);
+    }
+    return d;
+  }
+
+  function txt(x, y, s, size, fill, anchor, weight) {
+    return '<text x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" font-size="' + size
+      + '" fill="' + fill + '" text-anchor="' + (anchor || "middle") + '"'
+      + (weight ? ' font-weight="' + weight + '"' : "") + '>' + esc(s) + '</text>';
+  }
+
+  function summarise(h, start, end) {
+    var wet = 0, windows = [], open = -1;
+    for (var i = start; i < end; i++) {
+      var mm = h.precipitation[i] || 0;
+      wet += mm;
+      if (mm >= 0.15) { if (open < 0) open = i; }
+      else if (open >= 0) { windows.push([open, i]); open = -1; }
+    }
+    if (open >= 0) windows.push([open, end]);
+    if (!windows.length) return "tørt de næste " + (end - start) + " timer";
+
+    var parts = [];
+    for (var k = 0; k < windows.length && k < 2; k++) {
+      var a = parseLocal(h.time[windows[k][0]]).getHours();
+      var b = parseLocal(h.time[Math.min(windows[k][1], h.time.length - 1)]).getHours();
+      parts.push(a === b ? ("kl. " + a) : (a + "-" + b));
+    }
+    return "regn " + parts.join(" og ") + ", i alt " + wet.toFixed(1) + " mm";
+  }
+
+  // ---- the chart ----------------------------------------------------------
+
+  function draw(data) {
+    var W = CHART_W, H = CHART_H;
+    var h = data.hourly;
+    var start = firstFutureIndex(h.time);
+    var end = Math.min(start + HOURS, h.time.length);
+    var n = end - start;
+    var i;
+
+    // vertical budget, all fixed
+    var padL = 42, padR = 42;
+    var yDayTitle = 16;
+    var yIcons = 28, iconH = 28;
+    var yHourLbl = yIcons + iconH + 17;      // 73
+    var topY = yHourLbl + 12;                // 85
+    var arrowsH = 28, gap = 30;
+    var avail = H - topY - arrowsH - gap - 10;   // 507
+    var topH = Math.round(avail * 0.58);         // 294
+    var botH = avail - topH;                     // 213
+    var topB = topY + topH;
+    var botT = topB + gap;
+    var botB = botT + botH;
+
+    var step = (W - padL - padR) / n;
+    function X(i) { return padL + (i - start + 0.5) * step; }
+
+    // scales
+    var tLo = Infinity, tHi = -Infinity, mmMax = 0, wMax = 0;
+    for (i = start; i < end; i++) {
+      if (h.temperature_2m[i] < tLo) tLo = h.temperature_2m[i];
+      if (h.temperature_2m[i] > tHi) tHi = h.temperature_2m[i];
+      if ((h.precipitation[i] || 0) > mmMax) mmMax = h.precipitation[i];
+      if (h.wind_speed_10m[i] > wMax) wMax = h.wind_speed_10m[i];
+      if (h.wind_gusts_10m && h.wind_gusts_10m[i] > wMax) wMax = h.wind_gusts_10m[i];
+    }
+    var tAx = niceAxis(tLo - 1, tHi + 1, 5);
+    var mAx = niceAxis(0, Math.max(mmMax, 2), 3); mAx.min = 0;
+    var wAx = niceAxis(0, Math.max(wMax, 6), 4); wAx.min = 0;
+
+    function Yt(v) { return topB - ((v - tAx.min) / (tAx.max - tAx.min)) * topH; }
+    function Ym(v) { return topB - ((v - mAx.min) / (mAx.max - mAx.min)) * topH; }
+    function Yw(v) { return botB - ((v - wAx.min) / (wAx.max - wAx.min)) * botH; }
+
+    var s = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '"'
+      + ' xmlns="http://www.w3.org/2000/svg"'
+      + ' font-family="-apple-system, Avenir Next, Segoe UI, Helvetica, Arial, sans-serif">';
+
+    // bands and gridlines
+    var t, k = 0;
+    for (t = tAx.min; t < tAx.max - 1e-6; t += tAx.step) {
+      if (k % 2 === 1) {
+        s += '<rect x="' + padL + '" y="' + Yt(t + tAx.step).toFixed(1) + '" width="' + (W - padL - padR)
+          + '" height="' + (Yt(t) - Yt(t + tAx.step)).toFixed(1) + '" fill="' + C.band + '"/>';
+      }
+      k++;
+    }
+    for (t = tAx.min; t <= tAx.max + 1e-6; t += tAx.step) {
+      s += '<line x1="' + padL + '" y1="' + Yt(t).toFixed(1) + '" x2="' + (W - padR)
+        + '" y2="' + Yt(t).toFixed(1) + '" stroke="' + C.grid + '" stroke-width="1"/>'
+        + txt(padL - 9, Yt(t) + 4, round(t), 13, C.faint, "end");
+    }
+    for (t = mAx.min; t <= mAx.max + 1e-6; t += mAx.step) {
+      s += txt(W - padR + 9, Ym(t) + 4, +t.toFixed(1), 13, C.faint, "start");
+    }
+    s += txt(padL - 9, topY - 9, "°C", 13, C.muted, "end")
+       + txt(W - padR + 9, topY - 9, "mm", 13, C.muted, "start");
+
+    // midnight separators and day titles
+    var dayStart = start, d;
+    for (i = start; i <= end; i++) {
+      var isEdge = (i === end);
+      if (!isEdge && parseLocal(h.time[i]).getHours() !== 0) continue;
+      if (i > start) {
+        if (!isEdge) {
+          var xm = (X(i) - step / 2).toFixed(1);
+          s += '<line x1="' + xm + '" y1="' + topY + '" x2="' + xm + '" y2="' + topB
+            + '" stroke="' + C.sep + '" stroke-width="1"/>'
+            + '<line x1="' + xm + '" y1="' + botT + '" x2="' + xm + '" y2="' + botB
+            + '" stroke="' + C.sep + '" stroke-width="1"/>';
+        }
+        d = parseLocal(h.time[dayStart]);
+        s += txt((X(dayStart) + X(i - 1)) / 2, yDayTitle,
+          DAYNAMES[d.getDay()] + " " + d.getDate() + ". " + MONTHS[d.getMonth()],
+          15, C.ink, "middle", "600");
+        dayStart = i;
+      }
+    }
+
+    // precipitation bars
+    var bw = Math.max(3, step * 0.62);
+    for (i = start; i < end; i++) {
+      var mm = h.precipitation[i] || 0;
+      if (mm < 0.05) continue;
+      var hgt = Math.max(3, topB - Ym(mm));
+      s += '<rect x="' + (X(i) - bw / 2).toFixed(1) + '" y="' + (topB - hgt).toFixed(1)
+        + '" width="' + bw.toFixed(1) + '" height="' + hgt.toFixed(1)
+        + '" fill="' + (mm >= 1 ? C.rainHigh : C.rainLow) + '" rx="1"/>';
+    }
+
+    // temperature line
+    var tp = [];
+    for (i = start; i < end; i++) tp.push([X(i), Yt(h.temperature_2m[i])]);
+    s += '<path d="' + smooth(tp) + '" fill="none" stroke="' + C.temp
+      + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>';
+
+    // icons and hour labels
+    for (i = start; i < end; i += ICON_EVERY) {
+      s += '<g transform="translate(' + (X(i) - iconH / 2).toFixed(1) + ',' + yIcons
+        + ') scale(' + (iconH / 24).toFixed(3) + ')">'
+        + iconSvg(h.weather_code[i], h.is_day[i] === 1) + '</g>'
+        + txt(X(i), yHourLbl, pad(parseLocal(h.time[i]).getHours()), 13, C.muted);
+    }
+
+    // wind panel
+    var w2;
+    for (w2 = wAx.min; w2 <= wAx.max + 1e-6; w2 += wAx.step) {
+      s += '<line x1="' + padL + '" y1="' + Yw(w2).toFixed(1) + '" x2="' + (W - padR)
+        + '" y2="' + Yw(w2).toFixed(1) + '" stroke="' + C.grid + '" stroke-width="1"/>'
+        + txt(padL - 9, Yw(w2) + 4, round(w2), 13, C.faint, "end");
+    }
+    s += txt(padL - 9, botT - 9, "m/s", 13, C.muted, "end");
+
+    if (h.wind_gusts_10m) {
+      var gp = [];
+      for (i = start; i < end; i++) gp.push([X(i), Yw(h.wind_gusts_10m[i])]);
+      s += '<path d="' + smooth(gp) + '" fill="none" stroke="' + C.wind
+        + '" stroke-width="1.8" stroke-dasharray="6 5" stroke-linecap="round"/>';
+    }
+    var wp = [];
+    for (i = start; i < end; i++) wp.push([X(i), Yw(h.wind_speed_10m[i])]);
+    s += '<path d="' + smooth(wp) + '" fill="none" stroke="' + C.wind
+      + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>';
+
+    // direction arrows, pointing where the wind blows to
+    var ay = botB + 18;
+    for (i = start; i < end; i += ICON_EVERY) {
+      s += '<g transform="translate(' + X(i).toFixed(1) + ',' + ay + ') rotate('
+        + ((h.wind_direction_10m[i] + 180) % 360).toFixed(0) + ')">'
+        + '<path d="M0 -8 L0 8 M0 8 L-3.6 3.6 M0 8 L3.6 3.6" fill="none" stroke="' + C.ink
+        + '" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>';
+    }
+
+    s += "</svg>";
+    document.getElementById("chart").innerHTML = s;
+    return { start: start, end: end };
+  }
+
+  // ---- render -------------------------------------------------------------
+
+  function render(data) {
+    // The title lives in the HTML so it can be edited without touching this.
+    var r = draw(data);
+    var cond = NAMES[group(data.current.weather_code)];
+
+    document.getElementById("summary").textContent = summarise(data.hourly, r.start, r.end);
+    document.getElementById("nowTemp").innerHTML = round(data.current.temperature_2m) + "&deg;";
+    document.getElementById("nowCond").textContent = cond.charAt(0).toUpperCase() + cond.slice(1);
+    document.getElementById("nowWind").innerHTML =
+      round(data.current.wind_speed_10m) + " m/s, f&oslash;les som "
+      + round(data.current.apparent_temperature) + "&deg;";
+
+    document.getElementById("boot").style.display = "none";
+    document.getElementById("app").style.visibility = "visible";
+  }
+
+  // ---- clock, dimming, staleness -----------------------------------------
+
+  var lastOk = 0;
+
+  function tick() {
+    var now = new Date();
+    document.getElementById("clock").textContent = pad(now.getHours()) + ":" + pad(now.getMinutes());
+    document.getElementById("date").textContent =
+      DAYNAMES[now.getDay()] + " " + now.getDate() + ". " + MONTHS[now.getMonth()];
+
+    var hr = now.getHours();
+    var night = (hr >= NIGHT_FROM || hr < NIGHT_TO);
+    document.getElementById("app").className =
+      night ? "night" : ((lastOk && Date.now() - lastOk > 95 * 60 * 1000) ? "stale" : "");
+    document.body.className = night ? "night" : "";
+
+    if (lastOk) {
+      var t = new Date(lastOk);
+      document.getElementById("updated").textContent =
+        "Opdateret " + t.getHours() + ":" + pad(t.getMinutes()) + "  ·  DMI HARMONIE via Open-Meteo";
+    }
+  }
+
+  // ---- fetch --------------------------------------------------------------
+
+  function load() {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", URL + "&_=" + Date.now(), true);
+    xhr.timeout = 20000;
+
+    xhr.onload = function () {
+      if (xhr.status < 200 || xhr.status >= 300) { fail(); return; }
+      try {
+        render(JSON.parse(xhr.responseText));
+        lastOk = Date.now();
+        tick();
+      } catch (e) { fail(); }
+    };
+    xhr.onerror = fail;
+    xhr.ontimeout = fail;
+    xhr.send();
+  }
+
+  function fail() {
+    var b = document.getElementById("boot");
+    if (lastOk) {
+      var t = new Date(lastOk);
+      document.getElementById("updated").textContent =
+        "Ingen forbindelse. Data fra kl. " + t.getHours() + ":" + pad(t.getMinutes());
+    } else {
+      b.textContent = "Ingen forbindelse";
+    }
+  }
+
+  window.addEventListener("resize", fit);
+  window.addEventListener("orientationchange", function () { setTimeout(fit, 300); });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { load(); tick(); fit(); }
+  });
+
+  fit();
+  load();
+  tick();
+  setInterval(load, FETCH_MS);
+  setInterval(tick, 5000);
+})();
+</script>
+
+</body>
+</html>

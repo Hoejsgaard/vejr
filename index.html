@@ -436,9 +436,13 @@
             + '" stroke="' + C.sep + '" stroke-width="1"/>';
         }
         d = parseLocal(h.time[dayStart]);
-        s += txt((X(dayStart) + X(i - 1)) / 2, yDayTitle,
-          DAYNAMES[d.getDay()] + " " + d.getDate() + ". " + MONTHS[d.getMonth()],
-          15, C.ink, "middle", "600");
+        var label = DAYNAMES[d.getDay()] + " " + d.getDate() + ". " + MONTHS[d.getMonth()];
+        // A partial day at either end centres its title outside the plot, so
+        // clamp it back inside. 7.6px per char is close enough at 15px semibold.
+        var half = label.length * 7.6 / 2;
+        var cx = (X(dayStart) + X(i - 1)) / 2;
+        cx = Math.max(padL + half, Math.min(W - padR - half, cx));
+        s += txt(cx, yDayTitle, label, 15, C.ink, "middle", "600");
         dayStart = i;
       }
     }

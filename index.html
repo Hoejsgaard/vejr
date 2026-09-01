@@ -75,8 +75,66 @@
   .clock { font-size: 38px; font-weight: 300; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
   .date { font-size: 16px; color: #6b7787; margin-top: 5px; }
 
-  #chart { flex: 0 0 628px; height: 628px; }
+  #chart, #radar { flex: 0 0 628px; height: 628px; }
   #chart svg { display: block; }
+
+  .toggle {
+    margin-left: 22px;
+    padding: 9px 16px;
+    font-size: 16px;
+    font-family: inherit;
+    color: #1c2530;
+    background: #f2f4f7;
+    border: 1px solid #dde2e8;
+    border-radius: 8px;
+    -webkit-appearance: none;
+    white-space: nowrap;
+  }
+  .toggle:active { background: #e4e8ee; }
+
+  /* ---------- radar ---------- */
+
+  #radar { display: none; position: relative; overflow: hidden; background: #dfe4e8; }
+  #radar.on { display: block; }
+
+  .layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  .layer img { position: absolute; display: block; border: 0; }
+  /* Desaturate the base map so the radar colours carry the meaning. */
+  #base { -webkit-filter: grayscale(1) brightness(1.07) contrast(0.82);
+                  filter: grayscale(1) brightness(1.07) contrast(0.82); }
+  .frame { opacity: 0; }
+  .frame.vis { opacity: 1; }
+
+  .home {
+    position: absolute;
+    width: 15px; height: 15px;
+    margin: -7.5px 0 0 -7.5px;
+    border: 2.5px solid #e0322a;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.55);
+  }
+
+  .stamp {
+    position: absolute;
+    top: 12px; left: 12px;
+    background: rgba(255,255,255,0.9);
+    border-radius: 7px;
+    padding: 7px 13px;
+    font-size: 19px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stamp.future { color: #2196d3; }
+
+  .attrib {
+    position: absolute;
+    right: 5px; bottom: 4px;
+    font-size: 11px;
+    color: #46505d;
+    background: rgba(255,255,255,0.8);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .attrib a { color: inherit; }
 
   .foot {
     flex: 0 0 22px;
@@ -131,12 +189,24 @@
         <div class="date" id="date"></div>
       </div>
 
+      <button class="toggle" id="toggle">Radar</button>
+
     </div>
 
     <div id="chart"></div>
 
+    <div id="radar">
+      <div class="layer" id="base"></div>
+      <div class="layer" id="frames"></div>
+      <div class="home" id="home"></div>
+      <div class="stamp" id="stamp">Henter radar</div>
+      <div class="attrib">
+        Radar: <a href="https://www.rainviewer.com">RainViewer</a> &nbsp;·&nbsp; Kort: &copy; OpenStreetMap
+      </div>
+    </div>
+
     <div class="foot">
-      <div class="legend">
+      <div class="legend" id="legend">
         <span><i class="swatch" style="border-color:#e0322a"></i>Temperatur</span>
         <span><i class="swatch block" style="background:#2196d3"></i>Nedbør</span>
         <span><i class="swatch" style="border-color:#1a9aa8"></i>Middelvind</span>
@@ -334,10 +404,16 @@
       + (weight ? ' font-weight="' + weight + '"' : "") + '>' + esc(s) + '</text>';
   }
 
+  var gaps = 0;
+
   function summarise(h, start, end) {
     var wet = 0, windows = [], open = -1;
+    gaps = 0;
     for (var i = start; i < end; i++) {
-      var mm = h.precipitation[i] || 0;
+      var mm = h.precipitation[i];
+      // A null is missing data, not a dry hour. Coercing it to 0 would hide
+      // a whole band of rain without anything looking wrong.
+      if (mm === null || mm === undefined) { gaps++; continue; }
       wet += mm;
       if (mm >= 0.15) { if (open < 0) open = i; }
       else if (open >= 0) { windows.push([open, i]); open = -1; }
@@ -493,10 +569,13 @@
       + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>';
 
     // direction arrows, pointing where the wind blows to
+    // wind_direction_10m is the direction the wind comes FROM. The arrowhead
+    // sits at y=+8, which is south at rotation 0, so rotating by the raw
+    // bearing already points the arrow where the wind is going.
     var ay = botB + 18;
     for (i = start; i < end; i += ICON_EVERY) {
       s += '<g transform="translate(' + X(i).toFixed(1) + ',' + ay + ') rotate('
-        + ((h.wind_direction_10m[i] + 180) % 360).toFixed(0) + ')">'
+        + h.wind_direction_10m[i].toFixed(0) + ')">'
         + '<path d="M0 -8 L0 8 M0 8 L-3.6 3.6 M0 8 L3.6 3.6" fill="none" stroke="' + C.ink
         + '" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>';
     }
@@ -543,7 +622,9 @@
     if (lastOk) {
       var t = new Date(lastOk);
       document.getElementById("updated").textContent =
-        "Opdateret " + t.getHours() + ":" + pad(t.getMinutes()) + "  ·  DMI HARMONIE via Open-Meteo";
+        "Opdateret " + t.getHours() + ":" + pad(t.getMinutes())
+        + (gaps ? "  ·  " + gaps + " timer uden nedbørsdata" : "")
+        + "  ·  DMI HARMONIE via Open-Meteo";
     }
   }
 
@@ -578,10 +659,156 @@
     }
   }
 
+  // ---- radar --------------------------------------------------------------
+  //
+  // No map library. The view never pans or zooms, so the tiles are just
+  // absolutely positioned images in a fixed world coordinate system.
+  //
+  // Base map and radar share one world size of 65536 px:
+  //   OSM       256 px tiles at z = 8
+  //   RainViewer 512 px tiles at z = 7  (7 is the free tier's max)
+
+  var RADAR_Z = 7;                       // RainViewer zoom
+  var RADAR_TILE = 512;
+  var BASE_Z = RADAR_Z + 1;              // OSM zoom for the same scale
+  var BASE_TILE = 256;
+  var WORLD = RADAR_TILE * Math.pow(2, RADAR_Z);
+  var RADAR_JSON = "https://api.rainviewer.com/public/weather-maps.json";
+  var FRAME_MS = 450;                    // per animation frame
+  var HOLD_MS = 1400;                    // pause on the last frame
+
+  function worldX(lon) { return (lon + 180) / 360 * WORLD; }
+  function worldY(lat) {
+    var s = Math.sin(lat * Math.PI / 180);
+    return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * WORLD;
+  }
+
+  var RW = CHART_W, RH = 628;
+  var originX = worldX(LON) - RW / 2;    // world px at the view's top-left
+  var originY = worldY(LAT) - RH / 2;
+
+  // Build a grid of <img> tiles covering the view for one URL template.
+  function tileLayer(tmpl, size, z) {
+    var scale = size * Math.pow(2, z) / WORLD;   // 1 for both layers here
+    var span = size / scale;
+    var x0 = Math.floor(originX / span), x1 = Math.floor((originX + RW) / span);
+    var y0 = Math.floor(originY / span), y1 = Math.floor((originY + RH) / span);
+    var max = Math.pow(2, z), out = "", tx, ty;
+
+    for (tx = x0; tx <= x1; tx++) {
+      for (ty = y0; ty <= y1; ty++) {
+        if (ty < 0 || ty >= max) continue;
+        var wrapped = ((tx % max) + max) % max;
+        out += '<img src="' + tmpl.replace("{z}", z).replace("{x}", wrapped).replace("{y}", ty)
+          + '" width="' + span + '" height="' + span + '" style="left:'
+          + (tx * span - originX).toFixed(0) + 'px;top:' + (ty * span - originY).toFixed(0) + 'px">';
+      }
+    }
+    return out;
+  }
+
+  var radarOn = false, frames = [], framePos = 0, frameTimer = null, radarBuilt = false;
+
+  function buildBase() {
+    if (radarBuilt) return;
+    document.getElementById("base").innerHTML =
+      tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", BASE_TILE, BASE_Z);
+    var home = document.getElementById("home");
+    home.style.left = (worldX(LON) - originX).toFixed(0) + "px";
+    home.style.top = (worldY(LAT) - originY).toFixed(0) + "px";
+    radarBuilt = true;
+  }
+
+  function loadRadar() {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", RADAR_JSON + "?_=" + Date.now(), true);
+    xhr.timeout = 20000;
+    xhr.onload = function () {
+      if (xhr.status < 200 || xhr.status >= 300) return;
+      var d;
+      try { d = JSON.parse(xhr.responseText); } catch (e) { return; }
+      if (!d.radar) return;
+
+      // Last hour of observations plus the nowcast frames.
+      var past = d.radar.past || [], now = d.radar.nowcast || [];
+      var list = past.slice(Math.max(0, past.length - 8)).concat(now);
+      var host = d.host || "https://tilecache.rainviewer.com";
+
+      var box = document.getElementById("frames");
+      box.innerHTML = "";
+      frames = [];
+
+      for (var i = 0; i < list.length; i++) {
+        var div = document.createElement("div");
+        div.className = "frame";
+        div.innerHTML = tileLayer(
+          host + list[i].path + "/" + RADAR_TILE + "/{z}/{x}/{y}/2/1_1.png",
+          RADAR_TILE, RADAR_Z);
+        box.appendChild(div);
+        frames.push({ el: div, time: list[i].time, future: i >= list.length - now.length });
+      }
+      framePos = 0;
+      if (radarOn) play();
+    };
+    xhr.send();
+  }
+
+  function showFrame(i) {
+    if (!frames.length) return;
+    framePos = (i + frames.length) % frames.length;
+    for (var k = 0; k < frames.length; k++) {
+      frames[k].el.className = (k === framePos) ? "frame vis" : "frame";
+    }
+    var f = frames[framePos], t = new Date(f.time * 1000);
+    var s = document.getElementById("stamp");
+    s.textContent = pad(t.getHours()) + ":" + pad(t.getMinutes()) + (f.future ? "  prognose" : "");
+    s.className = f.future ? "stamp future" : "stamp";
+  }
+
+  function schedule() {
+    var isLast = (framePos === frames.length - 1);
+    frameTimer = setTimeout(function () {
+      showFrame(framePos + 1);
+      schedule();
+    }, isLast ? HOLD_MS : FRAME_MS);
+  }
+
+  function play() {
+    stopPlay();
+    if (!frames.length) return;
+    showFrame(framePos);
+    schedule();
+  }
+
+  function stopPlay() {
+    if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+  }
+
+  function setView(toRadar) {
+    radarOn = toRadar;
+    document.getElementById("chart").style.display = toRadar ? "none" : "block";
+    document.getElementById("radar").className = toRadar ? "on" : "";
+    document.getElementById("legend").style.visibility = toRadar ? "hidden" : "visible";
+    document.getElementById("toggle").textContent = toRadar ? "Graf" : "Radar";
+
+    if (toRadar) {
+      buildBase();
+      if (!frames.length) loadRadar(); else play();
+    } else {
+      stopPlay();
+    }
+  }
+
+  document.getElementById("toggle").addEventListener("click", function () {
+    setView(!radarOn);
+  });
+
   window.addEventListener("resize", fit);
   window.addEventListener("orientationchange", function () { setTimeout(fit, 300); });
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) { load(); tick(); fit(); }
+    if (document.hidden) { stopPlay(); return; }
+    load(); tick(); fit();
+    if (radarOn) { loadRadar(); }
   });
 
   fit();
@@ -589,6 +816,7 @@
   tick();
   setInterval(load, FETCH_MS);
   setInterval(tick, 5000);
+  setInterval(function () { if (radarOn) loadRadar(); }, 5 * 60 * 1000);
 })();
 </script>
 
